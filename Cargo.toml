@@ -1,0 +1,13 @@
+[package]
+name = "stm32f4-discovery-signal-generator"
+version = "0.1.0"
+authors = ["Matt Mullins <mmullins@mmlx.us>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+cortex-m = "0.6"
+cortex-m-rt = "0.6"
+panic-itm = "0.4.0"
+stm32f407g-disc = { git = "https://github.com/stm32-rs/stm32f407g-disc.git" }
