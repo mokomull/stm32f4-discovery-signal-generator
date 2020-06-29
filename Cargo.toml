@@ -11,6 +11,9 @@ cortex-m = "0.6"
 cortex-m-rt = "0.6"
 panic-itm = "0.4.0"
 stm32f407g-disc = { git = "https://github.com/stm32-rs/stm32f407g-disc.git" }
+stm32f4xx-hal = { version = "0.8", features = [ "usb_fs" ]}
+usb-device = "0.2"
+usbd-serial = "0.1"
 
 [profile.release]
 opt-level = "s"

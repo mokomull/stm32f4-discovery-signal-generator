@@ -221,6 +221,9 @@ dependencies = [
  "cortex-m-rt",
  "panic-itm",
  "stm32f407g-disc",
+ "stm32f4xx-hal",
+ "usb-device",
+ "usbd-serial",
 ]
 
 [[package]]
@@ -251,7 +254,18 @@ dependencies = [
  "nb",
  "rand_core",
  "stm32f4",
+ "synopsys-usb-otg",
  "void",
+]
+
+[[package]]
+name = "stm32ral"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8665561cb3422ddf54d257bf6cb3c5432ba0684f6937c4ad987bad16aa6ca496"
+dependencies = [
+ "bare-metal",
+ "cortex-m",
 ]
 
 [[package]]
@@ -266,6 +280,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "synopsys-usb-otg"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bcd2ca4e946cd2f33dfe2b0485f6b3c306721a035699f44f576d69e45b38db0"
+dependencies = [
+ "cortex-m",
+ "stm32ral",
+ "usb-device",
+ "vcell",
+]
+
+[[package]]
 name = "typenum"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -276,6 +302,23 @@ name = "unicode-xid"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "826e7639553986605ec5979c7dd957c7895e93eabed50ab2ffa7f6128a75097c"
+
+[[package]]
+name = "usb-device"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e5e2b9ba23f0d9ef7a34e498b6581c9d67944a1916542bfc7238bf1dc0d6acd"
+
+[[package]]
+name = "usbd-serial"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b45051be4bc25e6f85caacb1d3f45ace644fcc6e662b3d976330912542b7f69e"
+dependencies = [
+ "embedded-hal",
+ "nb",
+ "usb-device",
+]
 
 [[package]]
 name = "vcell"
