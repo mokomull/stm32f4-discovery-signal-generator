@@ -46,5 +46,29 @@ fn main() -> ! {
         x => iprintln!(itm, "error writing {:?}", x),
     }
 
+    set_dac_register(&mut i2c, 0x04, 0xaf); // headphone channels ON, speaker channels OFF
+    set_dac_register(&mut i2c, 0x05, 0x30); // auto = 0, speed = 01, 32kgroup = 1, videoclk = 0, ratio = 0, mclkdiv2 = 0
+    set_dac_register(&mut i2c, 0x06, 0x00); // I2S slave, not inverted, not DSP mode, left justified format
+    set_dac_register(&mut i2c, 0x07, 0x00); // leave Interface Control 2 alone
+
+    // section 4.11 from the CS43L22 datasheet
+    set_dac_register(&mut i2c, 0x00, 0x99);
+    set_dac_register(&mut i2c, 0x47, 0x80);
+    set_dac_register(&mut i2c, 0x32, 0x80);
+    set_dac_register(&mut i2c, 0x32, 0x00);
+
+    // step 6 of 4.9 of CS43L22 datasheet
+    set_dac_register(&mut i2c, 0x00, 0x9e);
+
     loop {}
+}
+
+use embedded_hal::blocking::i2c;
+
+fn set_dac_register<I>(i2c: &mut I, register: u8, value: u8)
+where
+    I: i2c::Write,
+    I::Error: core::fmt::Debug,
+{
+    i2c.write(ADDRESS, &[register, value]).unwrap();
 }
