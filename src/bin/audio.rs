@@ -32,11 +32,11 @@ fn main() -> ! {
 
     // enable the I2S PLL: the VCO input should be 2MHz since we have an 8MHz crystal -- but that's
     // going to depend on what freeze() chose above.
-    // 2MHz * 128 / 5 = 51.2 MHz
+    // 2MHz * 256 / 5 = 102.4 MHz
     unsafe {
         let rcc = &*stm32f4xx_hal::stm32::RCC::ptr();
         rcc.plli2scfgr.write(|w| {
-            w.plli2sn().bits(128);
+            w.plli2sn().bits(256);
             w.plli2sr().bits(5)
         });
         rcc.cr.modify(|_r, w| w.plli2son().set_bit());
@@ -53,6 +53,9 @@ fn main() -> ! {
         w.datlen().variant(i2scfgr::DATLEN_A::SIXTEENBIT);
         w.chlen().variant(i2scfgr::CHLEN_A::SIXTEENBIT)
     });
+    // 102.4MHz / (12 * 2 + 1) = 4096kHz MCK
+    // 4096kHz / 8 [fixed in hardware] = 512kHz bit clock
+    // 512kHz / (2 channels * 16 bits per sample) = 16k samples per sec
     spi.i2spr.write(|w| {
         w.mckoe().set_bit();
         unsafe { w.i2sdiv().bits(12) };
@@ -101,13 +104,13 @@ fn main() -> ! {
     const LEVEL: i16 = 0x7ff;
 
     loop {
-        // 4 samples, L and R channels, of each low and high - should give me 8k / (4 * 2) = 1000Hz
-        for _ in 0..(4 * 2) {
+        // 8 samples, L and R channels, of each low and high - should give me 16k / (8 * 2) = 1000Hz
+        for _ in 0..(8 * 2) {
             spi.dr.write(|w| w.dr().bits(LEVEL as u16));
             while !spi.sr.read().txe().bit() {}
         }
 
-        for _ in 0..(4 * 2) {
+        for _ in 0..(8 * 2) {
             spi.dr.write(|w| w.dr().bits(-LEVEL as u16));
             while !spi.sr.read().txe().bit() {}
         }
