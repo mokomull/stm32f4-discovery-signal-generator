@@ -85,7 +85,7 @@ fn main() -> ! {
     }
 
     set_dac_register(&mut i2c, 0x04, 0xaf); // headphone channels ON, speaker channels OFF
-    set_dac_register(&mut i2c, 0x05, 0x30); // auto = 0, speed = 01, 32kgroup = 1, videoclk = 0, ratio = 0, mclkdiv2 = 0
+    set_dac_register(&mut i2c, 0x05, 0x80); // auto = 1, everything else 0
     set_dac_register(&mut i2c, 0x06, 0x00); // I2S slave, not inverted, not DSP mode, left justified format
     set_dac_register(&mut i2c, 0x07, 0x00); // leave Interface Control 2 alone
 
@@ -96,16 +96,19 @@ fn main() -> ! {
     set_dac_register(&mut i2c, 0x32, 0x00);
 
     // step 6 of 4.9 of CS43L22 datasheet
-    set_dac_register(&mut i2c, 0x00, 0x9e);
+    set_dac_register(&mut i2c, 0x02, 0x9e);
+
+    const LEVEL: i16 = 0x7ff;
 
     loop {
         // 4 samples, L and R channels, of each low and high - should give me 8k / (4 * 2) = 1000Hz
         for _ in 0..(4 * 2) {
-            spi.dr.write(|w| w.dr().bits(0x1ff));
+            spi.dr.write(|w| w.dr().bits(LEVEL as u16));
             while !spi.sr.read().txe().bit() {}
         }
+
         for _ in 0..(4 * 2) {
-            spi.dr.write(|w| w.dr().bits(0));
+            spi.dr.write(|w| w.dr().bits(-LEVEL as u16));
             while !spi.sr.read().txe().bit() {}
         }
     }
