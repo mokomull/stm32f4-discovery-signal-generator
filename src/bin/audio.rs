@@ -98,6 +98,10 @@ fn main() -> ! {
     set_dac_register(&mut i2c, 0x32, 0x80);
     set_dac_register(&mut i2c, 0x32, 0x00);
 
+    // set master volume control to -16dB
+    set_dac_register(&mut i2c, 0x20, -32i8 as u8);
+    set_dac_register(&mut i2c, 0x21, -32i8 as u8);
+
     // step 6 of 4.9 of CS43L22 datasheet
     set_dac_register(&mut i2c, 0x02, 0x9e);
 
@@ -109,7 +113,6 @@ fn main() -> ! {
 
     loop {
         for &sample in SINES {
-            let sample = sample / 8;
             spi.dr.write(|w| w.dr().bits(sample as u16));
             while !spi.sr.read().txe().bit() {}
             spi.dr.write(|w| w.dr().bits(sample as u16));
