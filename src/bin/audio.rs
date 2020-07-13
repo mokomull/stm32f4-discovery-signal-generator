@@ -6,6 +6,7 @@ use cortex_m_rt::entry;
 use panic_itm as _;
 
 use stm32f4xx_hal::prelude::*;
+use stm32f4xx_hal::stm32::spi1::i2scfgr;
 
 const ADDRESS: u8 = 0x94 >> 1;
 
@@ -19,8 +20,45 @@ fn main() -> ! {
 
     let itm = &mut core_peripherals.ITM.stim[0];
 
+    let porta = peripherals.GPIOA.split();
     let portb = peripherals.GPIOB.split();
+    let portc = peripherals.GPIOC.split();
     let portd = peripherals.GPIOD.split();
+
+    let _mck = portc.pc7.into_alternate_af6();
+    let _sck = portc.pc10.into_alternate_af6();
+    let _sd = portc.pc12.into_alternate_af6();
+    let _ws = porta.pa4.into_alternate_af6();
+
+    // enable the I2S PLL: the VCO input should be 2MHz since we have an 8MHz crystal -- but that's
+    // going to depend on what freeze() chose above.
+    // 2MHz * 128 / 5 = 51.2 MHz
+    unsafe {
+        let rcc = &*stm32f4xx_hal::stm32::RCC::ptr();
+        rcc.plli2scfgr.write(|w| {
+            w.plli2sn().bits(128);
+            w.plli2sr().bits(5)
+        });
+        rcc.cr.modify(|_r, w| w.plli2son().set_bit());
+        while !rcc.cr.read().plli2srdy().bit() {}
+        // turn on power to the SPI3/I2S3 peripheral
+        rcc.apb1enr.modify(|_r, w| w.spi3en().set_bit());
+    }
+    let spi = peripherals.SPI3;
+    spi.i2scfgr.write(|w| {
+        w.i2smod().set_bit();
+        w.i2scfg().variant(i2scfgr::I2SCFG_A::MASTERTX);
+        w.i2sstd().variant(i2scfgr::I2SSTD_A::MSB);
+        w.ckpol().set_bit();
+        w.datlen().variant(i2scfgr::DATLEN_A::SIXTEENBIT);
+        w.chlen().variant(i2scfgr::CHLEN_A::SIXTEENBIT)
+    });
+    spi.i2spr.write(|w| {
+        w.mckoe().set_bit();
+        unsafe { w.i2sdiv().bits(12) };
+        w.odd().set_bit()
+    });
+    spi.i2scfgr.modify(|_r, w| w.i2se().set_bit());
 
     let mut audio_reset = portd.pd4.into_push_pull_output();
     audio_reset.set_high().unwrap();
@@ -60,7 +98,17 @@ fn main() -> ! {
     // step 6 of 4.9 of CS43L22 datasheet
     set_dac_register(&mut i2c, 0x00, 0x9e);
 
-    loop {}
+    loop {
+        // 4 samples, L and R channels, of each low and high - should give me 8k / (4 * 2) = 1000Hz
+        for _ in 0..(4 * 2) {
+            spi.dr.write(|w| w.dr().bits(0x1ff));
+            while !spi.sr.read().txe().bit() {}
+        }
+        for _ in 0..(4 * 2) {
+            spi.dr.write(|w| w.dr().bits(0));
+            while !spi.sr.read().txe().bit() {}
+        }
+    }
 }
 
 use embedded_hal::blocking::i2c;
