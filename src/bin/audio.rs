@@ -1,6 +1,8 @@
 #![no_main]
 #![no_std]
 
+use core::cmp::{max, min};
+
 use cortex_m::iprintln;
 use cortex_m_rt::entry;
 use panic_itm as _;
@@ -85,26 +87,54 @@ fn main() -> ! {
 
     dac.cr.write(|w| w.en1().set_bit());
 
-    loop {
-        for &value in SINES {
-            while !timer.sr.read().uif().bit() {
-                check_usb(&mut device, &mut serial);
-            }
-            timer.sr.modify(|_r, w| w.uif().clear_bit());
+    let mut command = [0; 8];
+    let mut chars = 0;
 
-            dac.dhr12r1.write(|w| unsafe { w.dacc1dhr().bits(value) });
-        }
+    loop {
+        let (action, value) = 'command: loop {
+            for &value in SINES {
+                while !timer.sr.read().uif().bit() {
+                    // make sure there's at least one byte available, by potentially sacrificing the last character in the buffer
+                    chars = min(chars, command.len() - 1);
+
+                    let buf = &mut command[chars..];
+                    if let Some(count) = check_usb(&mut device, &mut serial, buf) {
+                        if count == 0 {
+                            // why is read() returning me Ok(0), it should be WouldBlock in this case...
+                            continue;
+                        }
+                        chars = min(command.len(), chars + count);
+                        if let Some(newline) = command[..chars].iter().position(|&c| c == b'\n') {
+                            let value_bytes = &command[1..newline];
+                            chars = 0;
+                            if value_bytes.iter().all(|&c| c >= b'0' && c <= b'9') {
+                                let mut value: usize = 0;
+                                for &c in value_bytes.iter() {
+                                    value *= 10;
+                                    value += (c - b'0') as usize;
+                                }
+                                break 'command (command[0], value);
+                            }
+                        }
+                    }
+                }
+                timer.sr.modify(|_r, w| w.uif().clear_bit());
+
+                dac.dhr12r1.write(|w| unsafe { w.dacc1dhr().bits(value) });
+            }
+        };
+        let _ = serial.write(&[action, b'\n']);
     }
 }
 
 fn check_usb<T: usb_device::bus::UsbBus>(
     bus: &mut UsbDevice<T>,
     class: &mut usbd_serial::SerialPort<T>,
-) {
+    buf: &mut [u8],
+) -> Option<usize> {
     if bus.poll(&mut [class]) {
-        let mut cbuf = [0; 8];
-        if let Ok(count) = class.read(&mut cbuf) {
-            // idk, do something with the characters we just read
-        }
+        return class.read(buf).ok();
     }
+
+    None
 }
