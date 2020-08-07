@@ -220,6 +220,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "embedded-hal",
+ "micromath",
  "panic-itm",
  "stm32f407g-disc",
  "stm32f4xx-hal",

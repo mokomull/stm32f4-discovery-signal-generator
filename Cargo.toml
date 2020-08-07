@@ -10,6 +10,7 @@ edition = "2018"
 cortex-m = "0.6"
 cortex-m-rt = "0.6"
 embedded-hal = "0.2"
+micromath = "1.0"
 panic-itm = "0.4.0"
 stm32f407g-disc = { git = "https://github.com/stm32-rs/stm32f407g-disc.git" }
 stm32f4xx-hal = { version = "0.8", features = [ "usb_fs" ]}
