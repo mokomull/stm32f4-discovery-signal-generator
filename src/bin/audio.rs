@@ -74,6 +74,9 @@ fn main() -> ! {
         let stream = &dma.st[5];
         // first, disable the stream so the addresses can be updated
         stream.cr.write(|w| w.en().clear_bit());
+        // and wait for anything in progress to finish
+        while stream.cr.read().en().bit() {}
+
         // from and to address
         stream
             .par
