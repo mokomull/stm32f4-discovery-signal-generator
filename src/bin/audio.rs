@@ -12,6 +12,8 @@ use usb_device::prelude::*;
 
 use stm32f4xx_hal::stm32;
 
+const DAC_VOLTAGE: f32 = 3.0;
+
 // 84MHz, since I suppose the APBx prescaler causes the timer clock to be doubled...
 const TIMER_CLOCK_RATE: usize = 84_000_000;
 const SAMPLE_RATE: usize = 10_500_000;
@@ -96,9 +98,11 @@ fn main() -> ! {
                 }
             }
         };
-        if action == b'f' {
-            signal_generator.set_frequency(value);
-        }
+        match action {
+            b'f' => signal_generator.set_frequency(value),
+            b'v' => signal_generator.set_mvpp(value),
+            _ => (),
+        };
     }
 }
 
@@ -106,6 +110,8 @@ struct SignalGenerator {
     samples: [u16; 42000],
     dac: stm32::DAC,
     dma: stm32::DMA1,
+    hz: usize,
+    mvpp: usize,
 }
 
 impl SignalGenerator {
@@ -121,10 +127,22 @@ impl SignalGenerator {
             samples: [0; 42000],
             dac,
             dma,
+            hz: 1000,
+            mvpp: 2_700,
         }
     }
 
     pub fn set_frequency(&mut self, hz: usize) {
+        self.hz = hz;
+        self.update();
+    }
+
+    pub fn set_mvpp(&mut self, mvpp: usize) {
+        self.mvpp = mvpp;
+        self.update();
+    }
+
+    fn update(&mut self) {
         // DAC is stream 5, channel 7
         let stream = &self.dma.st[5];
         // first, disable the stream so the addresses can be updated
@@ -133,7 +151,7 @@ impl SignalGenerator {
         while stream.cr.read().en().bit() {}
 
         // calculate the new samples to be sent
-        let loop_samples = update_frequency(&mut self.samples, hz);
+        let loop_samples = update_frequency(&mut self.samples, self.hz, self.mvpp);
 
         // from and to address
         stream
@@ -193,13 +211,14 @@ fn check_usb<T: usb_device::bus::UsbBus>(
 }
 
 #[inline(never)]
-fn update_frequency(samples: &mut [u16], hz: usize) -> usize {
+fn update_frequency(samples: &mut [u16], hz: usize, mvpp: usize) -> usize {
     use micromath::F32Ext;
 
     let loop_samples = min(SAMPLE_RATE / hz, samples.len());
+    let vpp = mvpp as f32 / 1000.0;
+    let amplitude = 0x1000 /* 12 bits */ as f32 * (vpp / 2.0) / DAC_VOLTAGE;
     for i in 0..loop_samples {
-        samples[i] = ((0x700 as f32
-            * (2.0 * 3.141592653589 * i as f32 / loop_samples as f32).sin())
+        samples[i] = ((amplitude * (2.0 * 3.141592653589 * i as f32 / loop_samples as f32).sin())
             + 0x800 as f32) as u16;
     }
 
