@@ -57,8 +57,9 @@ fn main() -> ! {
     let dac = peripherals.DAC;
     let timer = peripherals.TIM4;
     let dma = peripherals.DMA1;
-    // 84MHz (since I suppose the APBx prescaler causes the timer clock to be doubled) / 400ksps
-    timer.arr.write(|w| w.arr().bits(210));
+    // 84MHz (since I suppose the APBx prescaler causes the timer clock to be doubled) / 400ksps;
+    // subtract one because the timer iterates from zero through (and including) this value.
+    timer.arr.write(|w| w.arr().bits(210 - 1));
     timer.cr2.write(|w| w.mms().update()); // send a TRGO event when the timer updates
     timer.cr1.write(|w| w.cen().set_bit());
 
