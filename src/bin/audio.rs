@@ -10,7 +10,7 @@ use panic_itm as _;
 use stm32f4xx_hal::prelude::*;
 use usb_device::prelude::*;
 
-const SAMPLE_RATE: usize = 400_000;
+const SAMPLE_RATE: usize = 10_500_000;
 
 #[entry]
 fn main() -> ! {
@@ -57,16 +57,16 @@ fn main() -> ! {
     let dac = peripherals.DAC;
     let timer = peripherals.TIM4;
     let dma = peripherals.DMA1;
-    // 84MHz (since I suppose the APBx prescaler causes the timer clock to be doubled) / 400ksps;
+    // 84MHz (since I suppose the APBx prescaler causes the timer clock to be doubled) / 10.5Msps;
     // subtract one because the timer iterates from zero through (and including) this value.
-    timer.arr.write(|w| w.arr().bits(210 - 1));
+    timer.arr.write(|w| w.arr().bits(8 - 1));
     timer.cr2.write(|w| w.mms().update()); // send a TRGO event when the timer updates
     timer.cr1.write(|w| w.cen().set_bit());
 
     let mut command = [0; 8];
     let mut chars = 0;
 
-    let mut samples = [0u16; 4000];
+    let mut samples = [0u16; 42000];
     let mut repeat = update_frequency(&mut samples, 1000);
 
     loop {
