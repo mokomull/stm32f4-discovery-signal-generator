@@ -84,6 +84,15 @@ fn main() -> ! {
         // since we'll have the memory transferred a u16 at a time, the number of samples is the
         // number of memory transactions
         stream.ndtr.write(|w| w.ndt().bits(repeat as u16));
+        // clear all the stream 5 bits from the status register -- the datasheet says they need to
+        // be clear before enabling the stream
+        dma.hifcr.write(|w| {
+            w.ctcif5().set_bit();
+            w.chtif5().set_bit();
+            w.cteif5().set_bit();
+            w.cdmeif5().set_bit();
+            w.cfeif5().set_bit()
+        });
         // enable the DMA channel
         stream.cr.write(|w| {
             w.chsel().bits(7); // channel 7 on stream 5 is DAC1
