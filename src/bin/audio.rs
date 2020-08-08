@@ -50,16 +50,17 @@ fn main() -> ! {
         let rcc = &*stm32f4xx_hal::stm32::RCC::ptr();
         rcc.apb1enr.modify(|_r, w| {
             w.dacen().set_bit();
-            w.tim3en().set_bit()
+            w.tim4en().set_bit()
         });
+        rcc.ahb1enr.modify(|_r, w| w.dma1en().set_bit());
     }
     let dac = peripherals.DAC;
-    let timer = peripherals.TIM3;
+    let timer = peripherals.TIM4;
+    let dma = peripherals.DMA1;
     // 84MHz (since I suppose the APBx prescaler causes the timer clock to be doubled) / 400ksps
     timer.arr.write(|w| w.arr().bits(210));
+    timer.cr2.write(|w| w.mms().update()); // send a TRGO event when the timer updates
     timer.cr1.write(|w| w.cen().set_bit());
-
-    dac.cr.write(|w| w.en1().set_bit());
 
     let mut command = [0; 8];
     let mut chars = 0;
@@ -68,36 +69,67 @@ fn main() -> ! {
     let mut repeat = update_frequency(&mut samples, 1000);
 
     loop {
-        let (action, value) = 'command: loop {
-            for &value in &samples[..repeat] {
-                while !timer.sr.read().uif().bit() {
-                    // make sure there's at least one byte available, by potentially sacrificing the last character in the buffer
-                    chars = min(chars, command.len() - 1);
+        // set up DMA to move `repeat` samples from `samples` to the DAC
+        let stream = &dma.st[5];
+        // first, disable the stream so the addresses can be updated
+        stream.cr.write(|w| w.en().clear_bit());
+        // from and to address
+        stream
+            .par
+            .write(|w| unsafe { w.bits(&dac.dhr12r1 as *const _ as u32) });
+        stream
+            .m0ar
+            .write(|w| unsafe { w.bits(&samples[0] as *const _ as u32) });
+        // since we'll have the memory transferred a u16 at a time, the number of samples is the
+        // number of memory transactions
+        stream.ndtr.write(|w| w.ndt().bits(repeat as u16));
+        // enable the DMA channel
+        stream.cr.write(|w| {
+            w.chsel().bits(7); // channel 7 on stream 5 is DAC1
+            w.mburst().single(); // single-word transfers
+            w.pburst().single();
+            w.dbm().disabled(); // no need for double-buffering
+            w.msize().bits16(); // each transfer is 16-bits
+            w.psize().bits16();
+            w.minc().incremented(); // increment the memory address we're reading from each cycle
+            w.pinc().fixed(); // but keep the peripheral register the same
+            w.circ().enabled(); // circular mode means I don't have to keep refilling the buffer
+            w.dir().memory_to_peripheral();
+            w.pfctrl().dma(); // DMA controller sets the buffer size
+            w.en().enabled() // enable the DMA stream!
+        });
+        // and tell the DAC to trigger DMA transfers
+        dac.cr.write(|w| {
+            w.dmaen1().enabled();
+            // the datasheet values for TSEL do not match the stm32f407 crate, so I'm trusting the datasheet.
+            unsafe { w.tsel1().bits(5) }; // timer 4 trigger
+            w.ten1().enabled();
+            w.en1().set_bit()
+        });
 
-                    let buf = &mut command[chars..];
-                    if let Some(count) = check_usb(&mut device, &mut serial, buf) {
-                        if count == 0 {
-                            // why is read() returning me Ok(0), it should be WouldBlock in this case...
-                            continue;
+        let (action, value) = 'command: loop {
+            // make sure there's at least one byte available, by potentially sacrificing the last character in the buffer
+            chars = min(chars, command.len() - 1);
+
+            let buf = &mut command[chars..];
+            if let Some(count) = check_usb(&mut device, &mut serial, buf) {
+                if count == 0 {
+                    // why is read() returning me Ok(0), it should be WouldBlock in this case...
+                    continue;
+                }
+                chars = min(command.len(), chars + count);
+                if let Some(newline) = command[..chars].iter().position(|&c| c == b'\n') {
+                    let value_bytes = &command[1..newline];
+                    chars = 0;
+                    if value_bytes.iter().all(|&c| c >= b'0' && c <= b'9') {
+                        let mut value: usize = 0;
+                        for &c in value_bytes.iter() {
+                            value *= 10;
+                            value += (c - b'0') as usize;
                         }
-                        chars = min(command.len(), chars + count);
-                        if let Some(newline) = command[..chars].iter().position(|&c| c == b'\n') {
-                            let value_bytes = &command[1..newline];
-                            chars = 0;
-                            if value_bytes.iter().all(|&c| c >= b'0' && c <= b'9') {
-                                let mut value: usize = 0;
-                                for &c in value_bytes.iter() {
-                                    value *= 10;
-                                    value += (c - b'0') as usize;
-                                }
-                                break 'command (command[0], value);
-                            }
-                        }
+                        break 'command (command[0], value);
                     }
                 }
-                timer.sr.modify(|_r, w| w.uif().clear_bit());
-
-                dac.dhr12r1.write(|w| unsafe { w.dacc1dhr().bits(value) });
             }
         };
         if action == b'f' {
