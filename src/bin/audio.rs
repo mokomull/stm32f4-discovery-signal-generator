@@ -49,8 +49,8 @@ fn main() -> ! {
     static mut USB_BUF: [u32; 32] = [0; 32];
 
     let bus = stm32f4xx_hal::otg_fs::UsbBus::new(usb, unsafe { &mut USB_BUF });
-    let mut serial = usbd_serial::SerialPort::new(&bus);
-    let mut device = UsbDeviceBuilder::new(&bus, UsbVidPid(0x1337, 0xd00d))
+    let serial = usbd_serial::SerialPort::new(&bus);
+    let device = UsbDeviceBuilder::new(&bus, UsbVidPid(0x1337, 0xd00d))
         .manufacturer("Matt Mullins")
         .product("STM32F4 experiment")
         .build();
@@ -65,44 +65,23 @@ fn main() -> ! {
         rcc.ahb1enr.modify(|_r, w| w.dma1en().set_bit());
     }
 
-    let mut command = [0; 8];
-    let mut chars = 0;
-
-    let mut signal_generator =
+    let signal_generator =
         SignalGenerator::new(peripherals.DAC, peripherals.DMA1, peripherals.TIM4);
-    signal_generator.set_frequency(1000);
+    // do not use signal_generator before passing it to usb_command; it prevents the SignalGenerator
+    // from being optimized to constructed in-place, which causes both this one AND the one inside
+    // usb_command to be allocated on the stack.  SignalGenerator is too large to fit in memory
+    // twice.
+
+    let mut command_buffer = [0; 8];
+    let mut usb_command = UsbCommand::new(device, serial, &mut command_buffer, signal_generator);
+
+    // make sure the signal generator sample memory has been initialized; we have to do this here,
+    // because the SignalGenerator can only be used after it's been moved to its final resting
+    // place.  We're still in the same module, so the lack of `pub` is a mere suggestion ;)
+    usb_command.signal_generator.update();
 
     loop {
-        let (action, value) = 'command: loop {
-            // make sure there's at least one byte available, by potentially sacrificing the last character in the buffer
-            chars = min(chars, command.len() - 1);
-
-            let buf = &mut command[chars..];
-            if let Some(count) = check_usb(&mut device, &mut serial, buf) {
-                if count == 0 {
-                    // why is read() returning me Ok(0), it should be WouldBlock in this case...
-                    continue;
-                }
-                chars = min(command.len(), chars + count);
-                if let Some(newline) = command[..chars].iter().position(|&c| c == b'\n') {
-                    let value_bytes = &command[1..newline];
-                    chars = 0;
-                    if value_bytes.iter().all(|&c| c >= b'0' && c <= b'9') {
-                        let mut value: usize = 0;
-                        for &c in value_bytes.iter() {
-                            value *= 10;
-                            value += (c - b'0') as usize;
-                        }
-                        break 'command (command[0], value);
-                    }
-                }
-            }
-        };
-        match action {
-            b'f' => signal_generator.set_frequency(value),
-            b'v' => signal_generator.set_mvpp(value),
-            _ => (),
-        };
+        usb_command.poll();
     }
 }
 
@@ -198,18 +177,6 @@ impl SignalGenerator {
     }
 }
 
-fn check_usb<T: usb_device::bus::UsbBus>(
-    bus: &mut UsbDevice<T>,
-    class: &mut usbd_serial::SerialPort<T>,
-    buf: &mut [u8],
-) -> Option<usize> {
-    if bus.poll(&mut [class]) {
-        return class.read(buf).ok();
-    }
-
-    None
-}
-
 #[inline(never)]
 fn update_frequency(samples: &mut [u16], hz: usize, mvpp: usize) -> usize {
     use micromath::F32Ext;
@@ -223,4 +190,74 @@ fn update_frequency(samples: &mut [u16], hz: usize, mvpp: usize) -> usize {
     }
 
     loop_samples
+}
+
+struct UsbCommand<'a, T: usb_device::bus::UsbBus> {
+    buffer: &'a mut [u8],
+    current_length: usize,
+    usb_device: UsbDevice<'a, T>,
+    serial_class: usbd_serial::SerialPort<'a, T>,
+    signal_generator: SignalGenerator,
+}
+
+impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
+    pub fn new(
+        usb_device: UsbDevice<'a, T>,
+        serial_class: usbd_serial::SerialPort<'a, T>,
+        buffer: &'a mut [u8],
+        signal_generator: SignalGenerator,
+    ) -> Self {
+        Self {
+            buffer,
+            current_length: 0,
+            usb_device,
+            serial_class,
+            signal_generator,
+        }
+    }
+
+    pub fn poll(&mut self) {
+        // make sure there's at least one byte available, by potentially sacrificing the last character in the buffer
+        self.current_length = min(self.current_length, self.buffer.len() - 1);
+
+        if let Some(count) = self.check_for_serial_bytes() {
+            if count == 0 {
+                // why is read() returning me Ok(0), it should be WouldBlock in this case...
+                return;
+            }
+            self.current_length = min(self.buffer.len(), self.current_length + count);
+            let filled_buf = &self.buffer[..self.current_length];
+            if let Some(newline) = filled_buf.iter().position(|&c| c == b'\n') {
+                let value_bytes = &filled_buf[1..newline];
+                // start reading the command from the beginning
+                self.current_length = 0;
+
+                if value_bytes.iter().all(|&c| c >= b'0' && c <= b'9') {
+                    let mut value: usize = 0;
+                    for &c in value_bytes.iter() {
+                        value *= 10;
+                        value += (c - b'0') as usize;
+                    }
+
+                    // execute the command that we just parsed; the first character tells us what we
+                    // should change
+                    match filled_buf[0] {
+                        b'f' => self.signal_generator.set_frequency(value),
+                        b'v' => self.signal_generator.set_mvpp(value),
+                        _ => (),
+                    };
+                }
+            }
+        }
+    }
+
+    fn check_for_serial_bytes(&mut self) -> Option<usize> {
+        let unused_buf = &mut self.buffer[self.current_length..];
+
+        if self.usb_device.poll(&mut [&mut self.serial_class]) {
+            return self.serial_class.read(unused_buf).ok();
+        }
+
+        None
+    }
 }
