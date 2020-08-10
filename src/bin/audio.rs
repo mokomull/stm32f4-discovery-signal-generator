@@ -1,6 +1,7 @@
 #![no_main]
 #![no_std]
 
+use core::cell::RefCell;
 use core::cmp::min;
 
 use cortex_m::iprintln;
@@ -10,7 +11,13 @@ use panic_itm as _;
 use stm32f4xx_hal::prelude::*;
 use usb_device::prelude::*;
 
+use cortex_m::interrupt::free as interrupt_free;
+use cortex_m::interrupt::Mutex;
+
 use stm32f4xx_hal::stm32;
+
+// the "interrupt" name is required to be in this namespacefor the cortex_m_rt::interrupt macro
+use stm32::interrupt;
 
 const DAC_VOLTAGE: f32 = 3.0;
 
@@ -21,6 +28,8 @@ const SAMPLE_RATE: usize = 10_500_000;
 static_assertions::const_assert_eq!(TIMER_CLOCK_RATE % SAMPLE_RATE, 0);
 // nor if it takes more than 16 bits to represent the delay
 static_assertions::const_assert!(TIMER_CLOCK_RATE / SAMPLE_RATE <= 65536);
+
+static USB_EVENT: Mutex<RefCell<bool>> = Mutex::new(RefCell::new(false));
 
 #[entry]
 fn main() -> ! {
@@ -81,8 +90,26 @@ fn main() -> ! {
     usb_command.signal_generator.update();
 
     loop {
-        usb_command.poll();
+        interrupt_free(|cs| {
+            if USB_EVENT.borrow(cs).replace(false) {
+                usb_command.poll();
+            }
+
+            unsafe {
+                stm32::NVIC::unmask(interrupt::OTG_FS);
+            }
+
+            cortex_m::asm::wfi();
+        });
     }
+}
+
+#[cortex_m_rt::interrupt]
+fn OTG_FS() {
+    interrupt_free(|cs| USB_EVENT.borrow(cs).replace(true));
+    // the peripheral will continue asserting the interrupt until it is poll()ed, so mask it here to
+    // avoid an infinite loop.  It needs to be unmasked before calling WFI.
+    stm32::NVIC::mask(interrupt::OTG_FS);
 }
 
 struct SignalGenerator {
