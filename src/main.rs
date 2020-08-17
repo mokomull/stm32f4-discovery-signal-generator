@@ -4,7 +4,6 @@
 use core::cell::RefCell;
 use core::cmp::min;
 
-use cortex_m::iprintln;
 use cortex_m_rt::entry;
 use panic_itm as _;
 
@@ -33,13 +32,10 @@ static USB_EVENT: Mutex<RefCell<bool>> = Mutex::new(RefCell::new(false));
 
 #[entry]
 fn main() -> ! {
-    let peripherals = stm32f407g_disc::Peripherals::take().unwrap();
-    let mut core_peripherals = cortex_m::Peripherals::take().unwrap();
+    let peripherals = stm32::Peripherals::take().unwrap();
 
     let rcc = peripherals.RCC.constrain();
-    let clocks = rcc.cfgr.use_hse(8.mhz()).sysclk(168.mhz()).freeze();
-
-    let itm = &mut core_peripherals.ITM.stim[0];
+    let _clocks = rcc.cfgr.use_hse(8.mhz()).sysclk(168.mhz()).freeze();
 
     let porta = peripherals.GPIOA.split();
 
