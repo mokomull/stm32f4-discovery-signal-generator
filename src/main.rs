@@ -18,6 +18,8 @@ use stm32f4xx_hal::stm32;
 // the "interrupt" name is required to be in this namespacefor the cortex_m_rt::interrupt macro
 use stm32::interrupt;
 
+type CommandDeque = arraydeque::ArrayDeque<[u8; 8], arraydeque::behavior::Wrapping>;
+
 const DAC_VOLTAGE: f32 = 3.0;
 
 // 84MHz, since I suppose the APBx prescaler causes the timer clock to be doubled...
@@ -77,8 +79,7 @@ fn main() -> ! {
     // usb_command to be allocated on the stack.  SignalGenerator is too large to fit in memory
     // twice.
 
-    let mut command_buffer = [0; 8];
-    let mut usb_command = UsbCommand::new(device, serial, &mut command_buffer, signal_generator);
+    let mut usb_command = UsbCommand::new(device, serial, signal_generator);
 
     // make sure the signal generator sample memory has been initialized; we have to do this here,
     // because the SignalGenerator can only be used after it's been moved to its final resting
@@ -216,8 +217,7 @@ fn update_frequency(samples: &mut [u16], hz: usize, mvpp: usize) -> usize {
 }
 
 struct UsbCommand<'a, T: usb_device::bus::UsbBus> {
-    buffer: &'a mut [u8],
-    current_length: usize,
+    buffer: CommandDeque,
     usb_device: UsbDevice<'a, T>,
     serial_class: usbd_serial::SerialPort<'a, T>,
     signal_generator: SignalGenerator,
@@ -227,12 +227,10 @@ impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
     pub fn new(
         usb_device: UsbDevice<'a, T>,
         serial_class: usbd_serial::SerialPort<'a, T>,
-        buffer: &'a mut [u8],
         signal_generator: SignalGenerator,
     ) -> Self {
         Self {
-            buffer,
-            current_length: 0,
+            buffer: CommandDeque::new(),
             usb_device,
             serial_class,
             signal_generator,
@@ -240,45 +238,40 @@ impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
     }
 
     pub fn poll(&mut self) {
-        // make sure there's at least one byte available, by potentially sacrificing the last character in the buffer
-        self.current_length = min(self.current_length, self.buffer.len() - 1);
+        let mut read_buffer = [0; 8];
 
-        if let Some(count) = self.check_for_serial_bytes() {
+        if let Some(count) = self.check_for_serial_bytes(&mut read_buffer) {
             if count == 0 {
                 // why is read() returning me Ok(0), it should be WouldBlock in this case...
                 return;
             }
-            self.current_length = min(self.buffer.len(), self.current_length + count);
-            let filled_buf = &self.buffer[..self.current_length];
-            if let Some(newline) = filled_buf.iter().position(|&c| c == b'\n') {
-                let value_bytes = &filled_buf[1..newline];
-                // start reading the command from the beginning
-                self.current_length = 0;
 
-                if value_bytes.iter().all(|&c| c >= b'0' && c <= b'9') {
+            self.buffer.extend_back(read_buffer.iter().take(count).cloned());
+            if let Some(newline) = self.buffer.iter().position(|&c| c == b'\n') {
+                let value_bytes = self.buffer.iter().skip(1).take(newline - 1);
+                if value_bytes.clone().all(|&c| c >= b'0' && c <= b'9') {
                     let mut value: usize = 0;
-                    for &c in value_bytes.iter() {
+                    for &c in value_bytes {
                         value *= 10;
                         value += (c - b'0') as usize;
                     }
 
                     // execute the command that we just parsed; the first character tells us what we
                     // should change
-                    match filled_buf[0] {
-                        b'f' => self.signal_generator.set_frequency(value),
-                        b'v' => self.signal_generator.set_mvpp(value),
+                    match self.buffer.front() {
+                        Some(b'f') => self.signal_generator.set_frequency(value),
+                        Some(b'v') => self.signal_generator.set_mvpp(value),
                         _ => (),
                     };
                 }
+                self.buffer.clear();
             }
         }
     }
 
-    fn check_for_serial_bytes(&mut self) -> Option<usize> {
-        let unused_buf = &mut self.buffer[self.current_length..];
-
+    fn check_for_serial_bytes(&mut self, read_buffer: &mut [u8]) -> Option<usize> {
         if self.usb_device.poll(&mut [&mut self.serial_class]) {
-            return self.serial_class.read(unused_buf).ok();
+            return self.serial_class.read(read_buffer).ok();
         }
 
         None
