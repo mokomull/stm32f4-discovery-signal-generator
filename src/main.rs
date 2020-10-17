@@ -91,7 +91,7 @@ fn main() -> ! {
             let mut buffer = [0u8; 8];
             let len = usb_command.read_line(&mut buffer).await;
 
-            let value_bytes = buffer.iter().skip(1).take(len - 1);
+            let value_bytes = buffer.iter().skip(1).take(len);
             if value_bytes.clone().all(|&c| c >= b'0' && c <= b'9') {
                 let mut value: usize = 0;
                 for &c in value_bytes {
