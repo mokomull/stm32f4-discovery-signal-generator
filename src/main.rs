@@ -75,21 +75,18 @@ fn main() -> ! {
         rcc.ahb1enr.modify(|_r, w| w.dma1en().set_bit());
     }
 
-    let signal_generator =
-        SignalGenerator::new(peripherals.DAC, peripherals.DMA1, peripherals.TIM4);
-    // do not use signal_generator before passing it to usb_command; it prevents the SignalGenerator
-    // from being optimized to constructed in-place, which causes both this one AND the one inside
-    // usb_command to be allocated on the stack.  SignalGenerator is too large to fit in memory
-    // twice.
+    let mut usb_command = UsbCommand::new(device, serial);
 
-    let mut usb_command = UsbCommand::new(device, serial, signal_generator);
-
-    // make sure the signal generator sample memory has been initialized; we have to do this here,
-    // because the SignalGenerator can only be used after it's been moved to its final resting
-    // place.  We're still in the same module, so the lack of `pub` is a mere suggestion ;)
-    usb_command.signal_generator.update();
+    let dac = peripherals.DAC;
+    let dma1 = peripherals.DMA1;
+    let tim4 = peripherals.TIM4;
 
     poll_OTG_FS(async move {
+        // move DAC, DMA1, and TIM4 separately into the closure, because the signal generator is too
+        // large to be moved, and any use of the identifier `peripherals` would actually cause the whole
+        // Peripherals struct to be moved in here.
+        let mut signal_generator = SignalGenerator::new(dac, dma1, tim4);
+
         loop {
             let mut buffer = [0u8; 8];
             let len = usb_command.read_line(&mut buffer).await;
@@ -105,8 +102,8 @@ fn main() -> ! {
                 // execute the command that we just parsed; the first character tells us what we
                 // should change
                 match buffer[0].clone() {
-                    b'f' => usb_command.signal_generator.set_frequency(value),
-                    b'v' => usb_command.signal_generator.set_mvpp(value),
+                    b'f' => signal_generator.set_frequency(value),
+                    b'v' => signal_generator.set_mvpp(value),
                     _ => {}
                 };
             }
@@ -170,13 +167,15 @@ impl SignalGenerator {
         timer.cr2.write(|w| w.mms().update()); // send a TRGO event when the timer updates
         timer.cr1.write(|w| w.cen().set_bit());
 
-        Self {
+        let mut me = Self {
             samples: [0; 42000],
             dac,
             dma,
             hz: 1000,
             mvpp: 2_700,
-        }
+        };
+        me.update();
+        me
     }
 
     pub fn set_frequency(&mut self, hz: usize) {
@@ -264,20 +263,14 @@ struct UsbCommand<'a, T: usb_device::bus::UsbBus> {
     buffer: CommandDeque,
     usb_device: UsbDevice<'a, T>,
     serial_class: usbd_serial::SerialPort<'a, T>,
-    signal_generator: SignalGenerator,
 }
 
 impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
-    pub fn new(
-        usb_device: UsbDevice<'a, T>,
-        serial_class: usbd_serial::SerialPort<'a, T>,
-        signal_generator: SignalGenerator,
-    ) -> Self {
+    pub fn new(usb_device: UsbDevice<'a, T>, serial_class: usbd_serial::SerialPort<'a, T>) -> Self {
         Self {
             buffer: CommandDeque::new(),
             usb_device,
             serial_class,
-            signal_generator,
         }
     }
 
