@@ -3,6 +3,9 @@
 
 use core::cell::RefCell;
 use core::cmp::min;
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
 use cortex_m_rt::entry;
 use panic_itm as _;
@@ -86,19 +89,29 @@ fn main() -> ! {
     // place.  We're still in the same module, so the lack of `pub` is a mere suggestion ;)
     usb_command.signal_generator.update();
 
-    loop {
-        interrupt_free(|cs| {
-            if USB_EVENT.borrow(cs).replace(false) {
-                usb_command.poll();
-            }
+    poll_OTG_FS(async move {
+        loop {
+            let mut buffer = [0u8; 8];
+            let len = usb_command.read_line(&mut buffer).await;
 
-            unsafe {
-                stm32::NVIC::unmask(interrupt::OTG_FS);
-            }
+            let value_bytes = buffer.iter().skip(1).take(len - 1);
+            if value_bytes.clone().all(|&c| c >= b'0' && c <= b'9') {
+                let mut value: usize = 0;
+                for &c in value_bytes {
+                    value *= 10;
+                    value += (c - b'0') as usize;
+                }
 
-            cortex_m::asm::wfi();
-        });
-    }
+                // execute the command that we just parsed; the first character tells us what we
+                // should change
+                match buffer[0].clone() {
+                    b'f' => usb_command.signal_generator.set_frequency(value),
+                    b'v' => usb_command.signal_generator.set_mvpp(value),
+                    _ => {}
+                };
+            }
+        }
+    })
 }
 
 #[cortex_m_rt::interrupt]
@@ -107,6 +120,37 @@ fn OTG_FS() {
     // the peripheral will continue asserting the interrupt until it is poll()ed, so mask it here to
     // avoid an infinite loop.  It needs to be unmasked before calling WFI.
     stm32::NVIC::mask(interrupt::OTG_FS);
+}
+
+#[allow(non_snake_case)]
+fn poll_OTG_FS<F>(mut future: F) -> F::Output
+where
+    F: core::future::Future,
+{
+    loop {
+        let polled = interrupt_free(|cs| -> Poll<F::Output> {
+            // the interrupt needs to be masked no matter what happens before we re-enable
+            // interrupts
+            unsafe {
+                stm32::NVIC::unmask(interrupt::OTG_FS);
+            }
+
+            if USB_EVENT.borrow(cs).replace(false) {
+                // TODO: what does the Waker even need to do here; for know I know everything needs
+                // to be polled if and only if the USB interrupt fires
+                let mut cx = Context::from_waker(unsafe { &*(0 as *const _) });
+                // unsafe: I don't even move `future` so this is fine, right?
+                return unsafe { Pin::new_unchecked(&mut future) }.poll(&mut cx);
+            }
+
+            cortex_m::asm::wfi();
+            Poll::Pending
+        });
+        match polled {
+            Poll::Ready(x) => return x,
+            Poll::Pending => {}
+        }
+    }
 }
 
 struct SignalGenerator {
@@ -237,35 +281,13 @@ impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
         }
     }
 
-    pub fn poll(&mut self) {
-        let mut read_buffer = [0; 8];
-
-        if let Some(count) = self.check_for_serial_bytes(&mut read_buffer) {
-            if count == 0 {
-                // why is read() returning me Ok(0), it should be WouldBlock in this case...
-                return;
-            }
-
-            self.buffer.extend_back(read_buffer.iter().take(count).cloned());
-            if let Some(newline) = self.buffer.iter().position(|&c| c == b'\n') {
-                let value_bytes = self.buffer.iter().skip(1).take(newline - 1);
-                if value_bytes.clone().all(|&c| c >= b'0' && c <= b'9') {
-                    let mut value: usize = 0;
-                    for &c in value_bytes {
-                        value *= 10;
-                        value += (c - b'0') as usize;
-                    }
-
-                    // execute the command that we just parsed; the first character tells us what we
-                    // should change
-                    match self.buffer.front() {
-                        Some(b'f') => self.signal_generator.set_frequency(value),
-                        Some(b'v') => self.signal_generator.set_mvpp(value),
-                        _ => (),
-                    };
-                }
-                self.buffer.clear();
-            }
+    pub fn read_line<'b>(&'b mut self, buffer: &'b mut [u8]) -> UsbReadLine<'b, T>
+    where
+        'b: 'a,
+    {
+        UsbReadLine {
+            usb_command: self,
+            target_buffer: buffer,
         }
     }
 
@@ -275,5 +297,37 @@ impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
         }
 
         None
+    }
+}
+
+struct UsbReadLine<'a, T: usb_device::bus::UsbBus> {
+    usb_command: &'a mut UsbCommand<'a, T>,
+    target_buffer: &'a mut [u8],
+}
+
+impl<'a, T: usb_device::bus::UsbBus> Future for UsbReadLine<'a, T> {
+    type Output = usize;
+
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {
+        let mut read_buffer = [0; 8];
+
+        if let Some(count) = self.usb_command.check_for_serial_bytes(&mut read_buffer) {
+            if count == 0 {
+                // why is read() returning me Ok(0), it should be WouldBlock in this case...
+                return Poll::Pending;
+            }
+
+            self.usb_command
+                .buffer
+                .extend_back(read_buffer.iter().take(count).cloned());
+            if let Some(newline) = self.usb_command.buffer.iter().position(|&c| c == b'\n') {
+                let me = Pin::into_inner(self);
+                for (i, v) in me.usb_command.buffer.drain(..newline).enumerate() {
+                    me.target_buffer[i] = v;
+                }
+                return Poll::Ready(newline - 1);
+            }
+        }
+        Poll::Pending
     }
 }
