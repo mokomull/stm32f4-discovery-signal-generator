@@ -281,10 +281,7 @@ impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
         }
     }
 
-    pub fn read_line<'b>(&'b mut self, buffer: &'b mut [u8]) -> UsbReadLine<'b, T>
-    where
-        'b: 'a,
-    {
+    pub fn read_line<'b>(&'b mut self, buffer: &'b mut [u8]) -> UsbReadLine<'a, 'b, T> {
         UsbReadLine {
             usb_command: self,
             target_buffer: buffer,
@@ -300,12 +297,18 @@ impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
     }
 }
 
-struct UsbReadLine<'a, T: usb_device::bus::UsbBus> {
-    usb_command: &'a mut UsbCommand<'a, T>,
-    target_buffer: &'a mut [u8],
+// 'a is the lifetime of the UsbDevice that's inside UsbCommand.  We actually don't care how long
+// that lives, but it needs to be separate so that the lifetime of the UsbReadLine does not get
+// *expanded* to fill the UsbDevice's full life expectancy.
+//
+// 'b is the lifetime of the byte buffer, which is actually the thing that we care about for this
+// Future.
+struct UsbReadLine<'a, 'b, T: usb_device::bus::UsbBus> {
+    usb_command: &'b mut UsbCommand<'a, T>,
+    target_buffer: &'b mut [u8],
 }
 
-impl<'a, T: usb_device::bus::UsbBus> Future for UsbReadLine<'a, T> {
+impl<'a, 'b, T: usb_device::bus::UsbBus> Future for UsbReadLine<'a, 'b, T> {
     type Output = usize;
 
     fn poll(mut self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {
