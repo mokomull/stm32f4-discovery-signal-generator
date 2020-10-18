@@ -318,7 +318,13 @@ impl<'a, 'b, T: usb_device::bus::UsbBus> Future for UsbReadLine<'a, 'b, T> {
                 .extend_back(read_buffer.iter().take(count).cloned());
             if let Some(newline) = self.usb_command.buffer.iter().position(|&c| c == b'\n') {
                 let me = Pin::into_inner(self);
-                for (i, v) in me.usb_command.buffer.drain(..newline).enumerate() {
+                for (i, v) in me
+                    .usb_command
+                    .buffer
+                    .drain(..newline + 1)
+                    .take(newline)
+                    .enumerate()
+                {
                     me.target_buffer[i] = v;
                 }
                 return Poll::Ready(newline - 1);
