@@ -272,19 +272,26 @@ impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
         }
     }
 
-    pub fn read_line<'b>(&'b mut self, buffer: &'b mut [u8]) -> UsbReadLine<'a, 'b, T> {
-        UsbReadLine {
-            usb_command: self,
-            target_buffer: buffer,
-        }
-    }
+    pub async fn read_line(&mut self, buffer: &mut [u8]) -> usize {
+        loop {
+            let mut read_buffer = [0; 8];
 
-    fn check_for_serial_bytes(&mut self, read_buffer: &mut [u8]) -> Option<usize> {
-        if self.usb_device.poll(&mut [&mut self.serial_class]) {
-            return self.serial_class.read(read_buffer).ok();
-        }
+            let count = UsbSerialRead {
+                usb_device: &mut self.usb_device,
+                serial_class: &mut self.serial_class,
+                target_buffer: &mut read_buffer,
+            }
+            .await;
 
-        None
+            self.buffer
+                .extend_back(read_buffer.iter().take(count).cloned());
+            if let Some(newline) = self.buffer.iter().position(|&c| c == b'\n') {
+                for (i, v) in self.buffer.drain(..newline + 1).take(newline).enumerate() {
+                    buffer[i] = v;
+                }
+                return newline;
+            }
+        }
     }
 }
 
@@ -292,41 +299,34 @@ impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
 // that lives, but it needs to be separate so that the lifetime of the UsbReadLine does not get
 // *expanded* to fill the UsbDevice's full life expectancy.
 //
-// 'b is the lifetime of the byte buffer, which is actually the thing that we care about for this
-// Future.
-struct UsbReadLine<'a, 'b, T: usb_device::bus::UsbBus> {
-    usb_command: &'b mut UsbCommand<'a, T>,
+// 'b is the lifetime of the buffers we actually care about in here.
+struct UsbSerialRead<'a, 'b, T: usb_device::bus::UsbBus> {
+    usb_device: &'b mut UsbDevice<'a, T>,
+    serial_class: &'b mut usbd_serial::SerialPort<'a, T>,
     target_buffer: &'b mut [u8],
 }
 
-impl<'a, 'b, T: usb_device::bus::UsbBus> Future for UsbReadLine<'a, 'b, T> {
+impl<'a, 'b, T: usb_device::bus::UsbBus> UsbSerialRead<'a, 'b, T> {
+    fn check_for_serial_bytes(&mut self) -> Option<usize> {
+        if self.usb_device.poll(&mut [self.serial_class]) {
+            return self.serial_class.read(self.target_buffer).ok();
+        }
+
+        None
+    }
+}
+
+impl<'a, 'b, T: usb_device::bus::UsbBus> Future for UsbSerialRead<'a, 'b, T> {
     type Output = usize;
 
     fn poll(mut self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {
-        let mut read_buffer = [0; 8];
-
-        if let Some(count) = self.usb_command.check_for_serial_bytes(&mut read_buffer) {
+        if let Some(count) = self.check_for_serial_bytes() {
             if count == 0 {
                 // why is read() returning me Ok(0), it should be WouldBlock in this case...
                 return Poll::Pending;
             }
 
-            self.usb_command
-                .buffer
-                .extend_back(read_buffer.iter().take(count).cloned());
-            if let Some(newline) = self.usb_command.buffer.iter().position(|&c| c == b'\n') {
-                let me = Pin::into_inner(self);
-                for (i, v) in me
-                    .usb_command
-                    .buffer
-                    .drain(..newline + 1)
-                    .take(newline)
-                    .enumerate()
-                {
-                    me.target_buffer[i] = v;
-                }
-                return Poll::Ready(newline);
-            }
+            return Poll::Ready(count);
         }
         Poll::Pending
     }
