@@ -246,7 +246,8 @@ impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
                 return;
             }
 
-            self.buffer.extend_back(read_buffer.iter().take(count).cloned());
+            self.buffer
+                .extend_back(read_buffer.iter().take(count).cloned());
             if let Some(newline) = self.buffer.iter().position(|&c| c == b'\n') {
                 let value_bytes = self.buffer.iter().skip(1).take(newline - 1);
                 if value_bytes.clone().all(|&c| c >= b'0' && c <= b'9') {
