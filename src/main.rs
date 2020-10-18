@@ -77,16 +77,14 @@ fn main() -> ! {
 
     let mut usb_command = UsbCommand::new(device, serial);
 
-    let dac = peripherals.DAC;
-    let dma1 = peripherals.DMA1;
-    let tim4 = peripherals.TIM4;
+    let mut signal_generator =
+        SignalGenerator::new(peripherals.DAC, peripherals.DMA1, peripherals.TIM4);
+    // since this &mut shadows the name of the underlying object, (a) the reference will be used
+    // instead, forcing (b) the borrow checker to vehemently oppose anything ever moving the
+    // underlying object.
+    let signal_generator = &mut signal_generator;
 
     poll_OTG_FS(async move {
-        // move DAC, DMA1, and TIM4 separately into the closure, because the signal generator is too
-        // large to be moved, and any use of the identifier `peripherals` would actually cause the whole
-        // Peripherals struct to be moved in here.
-        let mut signal_generator = SignalGenerator::new(dac, dma1, tim4);
-
         loop {
             let mut buffer = [0u8; 8];
             let len = usb_command.read_line(&mut buffer).await;
