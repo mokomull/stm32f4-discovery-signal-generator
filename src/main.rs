@@ -99,7 +99,7 @@ fn main() -> ! {
 
                 // execute the command that we just parsed; the first character tells us what we
                 // should change
-                match buffer[0].clone() {
+                match buffer[0] {
                     b'f' => signal_generator.set_frequency(value),
                     b'v' => signal_generator.set_mvpp(value),
                     _ => {}
@@ -133,7 +133,7 @@ where
             if USB_EVENT.borrow(cs).replace(false) {
                 // TODO: what does the Waker even need to do here; for know I know everything needs
                 // to be polled if and only if the USB interrupt fires
-                let mut cx = Context::from_waker(unsafe { &*(0 as *const _) });
+                let mut cx = Context::from_waker(unsafe { &*core::ptr::null() });
                 // unsafe: I don't even move `future` so this is fine, right?
                 return unsafe { Pin::new_unchecked(&mut future) }.poll(&mut cx);
             }
