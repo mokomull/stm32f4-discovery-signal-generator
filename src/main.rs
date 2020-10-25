@@ -115,6 +115,7 @@ struct SignalGenerator {
     dma: stm32::DMA1,
     hz: usize,
     mvpp: usize,
+    mvoff: usize,
 }
 
 impl SignalGenerator {
@@ -132,6 +133,7 @@ impl SignalGenerator {
             dma,
             hz: 1000,
             mvpp: 2_700,
+            mvoff: 1_500,
         }
     }
 
@@ -145,6 +147,11 @@ impl SignalGenerator {
         self.update();
     }
 
+    pub fn set_mvoff(&mut self, mvoff: usize) {
+        self.mvoff = mvoff;
+        self.update();
+    }
+
     fn update(&mut self) {
         // DAC is stream 5, channel 7
         let stream = &self.dma.st[5];
@@ -154,7 +161,7 @@ impl SignalGenerator {
         while stream.cr.read().en().bit() {}
 
         // calculate the new samples to be sent
-        let loop_samples = update_frequency(&mut self.samples, self.hz, self.mvpp);
+        let loop_samples = update_frequency(&mut self.samples, self.hz, self.mvpp, self.mvoff);
 
         // from and to address
         stream
@@ -202,15 +209,17 @@ impl SignalGenerator {
 }
 
 #[inline(never)]
-fn update_frequency(samples: &mut [u16], hz: usize, mvpp: usize) -> usize {
+fn update_frequency(samples: &mut [u16], hz: usize, mvpp: usize, mvoff: usize) -> usize {
     use micromath::F32Ext;
 
     let loop_samples = min(SAMPLE_RATE / hz, samples.len());
     let vpp = mvpp as f32 / 1000.0;
     let amplitude = 0x1000 /* 12 bits */ as f32 * (vpp / 2.0) / DAC_VOLTAGE;
+    let off = mvoff as f32 / 1000.0;
+    let offset = 0x1000 /* 12 bits */ as f32 * off / DAC_VOLTAGE;
     for i in 0..loop_samples {
         samples[i] = ((amplitude * (2.0 * 3.141592653589 * i as f32 / loop_samples as f32).sin())
-            + 0x800 as f32) as u16;
+            + offset) as u16;
     }
 
     loop_samples
@@ -262,6 +271,7 @@ impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
                     match self.buffer.front() {
                         Some(b'f') => self.signal_generator.set_frequency(value),
                         Some(b'v') => self.signal_generator.set_mvpp(value),
+                        Some(b'o') => self.signal_generator.set_mvoff(value),
                         _ => (),
                     };
                 }
