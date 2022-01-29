@@ -123,6 +123,8 @@ fn poll_OTG_FS<F>(mut future: F) -> F::Output
 where
     F: core::future::Future,
 {
+    let mut cx = Context::from_waker(unsafe { &*core::ptr::null() });
+
     loop {
         let polled = interrupt_free(|cs| -> Poll<F::Output> {
             // the interrupt needs to be masked no matter what happens before we re-enable
@@ -134,7 +136,6 @@ where
             if USB_EVENT.borrow(cs).replace(false) {
                 // TODO: what does the Waker even need to do here; for know I know everything needs
                 // to be polled if and only if the USB interrupt fires
-                let mut cx = Context::from_waker(unsafe { &*core::ptr::null() });
                 // unsafe: I don't even move `future` so this is fine, right?
                 return unsafe { Pin::new_unchecked(&mut future) }.poll(&mut cx);
             }
