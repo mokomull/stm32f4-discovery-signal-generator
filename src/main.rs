@@ -90,7 +90,7 @@ fn main() -> ! {
             let len = usb_command.read_line(&mut buffer).await;
 
             let value_bytes = buffer.iter().skip(1).take(len - 1);
-            if value_bytes.clone().all(|&c| c >= b'0' && c <= b'9') {
+            if value_bytes.clone().all(|c| (b'0'..=b'9').contains(c)) {
                 let mut value: usize = 0;
                 for &c in value_bytes {
                     value *= 10;
@@ -268,8 +268,10 @@ fn update_frequency(samples: &mut [u16], hz: usize, mvpp: usize, mvoff: usize) -
     let amplitude = 0x1000 /* 12 bits */ as f32 * (vpp / 2.0) / DAC_VOLTAGE;
     let off = mvoff as f32 / 1000.0;
     let offset = 0x1000 /* 12 bits */ as f32 * off / DAC_VOLTAGE;
+    #[allow(clippy::needless_range_loop)]
     for i in 0..loop_samples {
-        samples[i] = ((amplitude * (2.0 * 3.141592653589 * i as f32 / loop_samples as f32).sin())
+        samples[i] = ((amplitude
+            * (2.0 * core::f32::consts::PI * i as f32 / loop_samples as f32).sin())
             + offset) as u16;
     }
 
