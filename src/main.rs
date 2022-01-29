@@ -89,13 +89,12 @@ fn main() -> ! {
             let mut buffer = [0u8; 8];
             let len = usb_command.read_line(&mut buffer).await;
 
-            let value_bytes = buffer.iter().skip(1).take(len - 1);
-            if value_bytes.clone().all(|c| (b'0'..=b'9').contains(c)) {
-                let mut value: usize = 0;
-                for &c in value_bytes {
-                    value *= 10;
-                    value += (c - b'0') as usize;
-                }
+            let value_bytes = &buffer[1..len];
+            if value_bytes.iter().all(|c| (b'0'..=b'9').contains(c)) {
+                // SAFETY: b'0'..=b'9' are all valid UTF-8 bytes
+                let value = unsafe { core::str::from_utf8_unchecked(value_bytes) };
+                // SAFETY: 7 decimal digits will always fit in a usize
+                let value = unsafe { value.parse().unwrap_unchecked() };
 
                 // execute the command that we just parsed; the first character tells us what we
                 // should change
