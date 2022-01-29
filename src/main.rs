@@ -5,7 +5,7 @@ use core::cell::RefCell;
 use core::cmp::min;
 use core::future::Future;
 use core::pin::Pin;
-use core::task::{Context, Poll};
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use cortex_m_rt::entry;
 use panic_itm as _;
@@ -123,7 +123,15 @@ fn poll_OTG_FS<F>(mut future: F) -> F::Output
 where
     F: core::future::Future,
 {
-    let mut cx = Context::from_waker(unsafe { &*core::ptr::null() });
+    fn nope<T>(_: *const ()) -> T {
+        unreachable!()
+    }
+
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(nope, nope, nope, nope);
+    let raw_waker = RawWaker::new(core::ptr::null(), &VTABLE);
+    let waker = unsafe { Waker::from_raw(raw_waker) };
+
+    let mut cx = Context::from_waker(&waker);
 
     loop {
         let polled = interrupt_free(|cs| -> Poll<F::Output> {
