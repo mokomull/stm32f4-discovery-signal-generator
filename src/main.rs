@@ -3,7 +3,6 @@
 
 use core::cell::RefCell;
 use core::cmp::min;
-use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use futures::prelude::*;
@@ -77,7 +76,7 @@ fn main() -> ! {
         rcc.ahb1enr.modify(|_r, w| w.dma1en().set_bit());
     }
 
-    let mut usb_command = UsbCommand::new(device, serial);
+    let mut usb_command = UsbCommand::new(device, serial).fuse();
 
     let mut signal_generator =
         SignalGenerator::new(peripherals.DAC, peripherals.DMA1, peripherals.TIM4);
@@ -86,12 +85,10 @@ fn main() -> ! {
     // underlying object.
     let signal_generator = &mut signal_generator;
 
-    let mut buffer = [0u8; 8];
-
     poll_OTG_FS(async move {
         loop {
             select_biased! {
-                len = usb_command.read_line(&mut buffer).fuse() => do_line(&buffer[..len], signal_generator),
+                cmd = usb_command.next() => do_line(&(cmd.expect("nothing ends the stream")), signal_generator),
                 _ = signal_generator.fill_buffer().fuse() => {}
             }
         }
@@ -304,64 +301,49 @@ impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
         }
     }
 
-    pub async fn read_line(&mut self, buffer: &mut [u8]) -> usize {
-        // TODO: this should return a Stream of some sort;
-
-        loop {
-            let mut read_buffer = [0; 8];
-
-            let count = UsbSerialRead {
-                usb_device: &mut self.usb_device,
-                serial_class: &mut self.serial_class,
-                target_buffer: &mut read_buffer,
-            }
-            .await;
-
-            self.buffer
-                .extend_back(read_buffer.iter().take(count).cloned());
-            if let Some(newline) = self.buffer.iter().position(|&c| c == b'\n') {
-                for (i, v) in self.buffer.drain(..newline + 1).take(newline).enumerate() {
-                    buffer[i] = v;
-                }
-                return newline;
-            }
-        }
+    fn split_borrow(&mut self) -> (&mut UsbDevice<'a, T>, &mut usbd_serial::SerialPort<'a, T>) {
+        (&mut self.usb_device, &mut self.serial_class)
     }
 }
 
-// 'a is the lifetime of the UsbDevice that's inside UsbCommand.  We actually don't care how long
-// that lives, but it needs to be separate so that the lifetime of the UsbReadLine does not get
-// *expanded* to fill the UsbDevice's full life expectancy.
-//
-// 'b is the lifetime of the buffers we actually care about in here.
-struct UsbSerialRead<'a, 'b, T: usb_device::bus::UsbBus> {
-    usb_device: &'b mut UsbDevice<'a, T>,
-    serial_class: &'b mut usbd_serial::SerialPort<'a, T>,
-    target_buffer: &'b mut [u8],
-}
+impl<'a, T: usb_device::bus::UsbBus> Stream for UsbCommand<'a, T> {
+    type Item = heapless::Vec<u8, 8>;
 
-impl<'a, 'b, T: usb_device::bus::UsbBus> UsbSerialRead<'a, 'b, T> {
-    fn check_for_serial_bytes(&mut self) -> Option<usize> {
-        if self.usb_device.poll(&mut [self.serial_class]) {
-            return self.serial_class.read(self.target_buffer).ok();
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let mut read_buffer = [0; 8];
+
+        // workaround: the Pin<> wrapper apparently confuses disjoint borrows:
+        // error[E0499]: cannot borrow `self` as mutable more than once at a time
+        //     --> src/main.rs:314:45
+        //     |
+        // 314 |         if !self.usb_device.poll(&mut [&mut self.serial_class]) {
+        //     |             ----            ----            ^^^^ second mutable borrow occurs here
+        //     |             |               |
+        //     |             |               first borrow later used by call
+        //     |             first mutable borrow occurs here
+        let (usb_device, serial_class) = self.split_borrow();
+        if !usb_device.poll(&mut [serial_class]) {
+            return Poll::Pending;
         }
 
-        None
-    }
-}
+        let count = match self.serial_class.read(&mut read_buffer).ok() {
+            Some(count) => count,
+            None => return Poll::Pending,
+        };
 
-impl<'a, 'b, T: usb_device::bus::UsbBus> Future for UsbSerialRead<'a, 'b, T> {
-    type Output = usize;
-
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {
-        if let Some(count) = self.check_for_serial_bytes() {
-            if count == 0 {
-                // why is read() returning me Ok(0), it should be WouldBlock in this case...
-                return Poll::Pending;
-            }
-
-            return Poll::Ready(count);
+        if count == 0 {
+            // why is read() returning me Ok(0), it should be WouldBlock in this case...
+            return Poll::Pending;
         }
+
+        self.buffer
+            .extend_back(read_buffer.iter().take(count).cloned());
+        if let Some(newline) = self.buffer.iter().position(|&c| c == b'\n') {
+            return Poll::Ready(Some(
+                self.buffer.drain(..newline + 1).take(newline).collect(),
+            ));
+        }
+
         Poll::Pending
     }
 }
