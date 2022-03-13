@@ -6,6 +6,8 @@ use core::cmp::min;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use futures::prelude::*;
+use futures::select_biased;
 
 use cortex_m_rt::entry;
 use panic_itm as _;
@@ -84,29 +86,35 @@ fn main() -> ! {
     // underlying object.
     let signal_generator = &mut signal_generator;
 
+    let mut buffer = [0u8; 8];
+
     poll_OTG_FS(async move {
         loop {
-            let mut buffer = [0u8; 8];
-            let len = usb_command.read_line(&mut buffer).await;
-
-            let value_bytes = &buffer[1..len];
-            if value_bytes.iter().all(|c| (b'0'..=b'9').contains(c)) {
-                // SAFETY: b'0'..=b'9' are all valid UTF-8 bytes
-                let value = unsafe { core::str::from_utf8_unchecked(value_bytes) };
-                // SAFETY: 7 decimal digits will always fit in a usize
-                let value = unsafe { value.parse().unwrap_unchecked() };
-
-                // execute the command that we just parsed; the first character tells us what we
-                // should change
-                match buffer[0] {
-                    b'f' => signal_generator.set_frequency(value),
-                    b'v' => signal_generator.set_mvpp(value),
-                    b'o' => signal_generator.set_mvoff(value),
-                    _ => {}
-                };
+            select_biased! {
+                len = usb_command.read_line(&mut buffer).fuse() => do_line(&buffer[..len], signal_generator),
+                _ = signal_generator.fill_buffer().fuse() => {}
             }
         }
     })
+}
+
+fn do_line(line: &[u8], signal_generator: &mut SignalGenerator) {
+    let value_bytes = &line[1..];
+    if value_bytes.iter().all(|c| (b'0'..=b'9').contains(c)) {
+        // SAFETY: b'0'..=b'9' are all valid UTF-8 bytes
+        let value = unsafe { core::str::from_utf8_unchecked(value_bytes) };
+        // SAFETY: 7 decimal digits will always fit in a usize
+        let value = unsafe { value.parse().unwrap_unchecked() };
+
+        // execute the command that we just parsed; the first character tells us what we
+        // should change
+        match line[0] {
+            b'f' => signal_generator.set_frequency(value),
+            b'v' => signal_generator.set_mvpp(value),
+            b'o' => signal_generator.set_mvoff(value),
+            _ => {}
+        };
+    }
 }
 
 #[cortex_m_rt::interrupt]
@@ -256,6 +264,10 @@ impl SignalGenerator {
             w.en1().set_bit()
         });
     }
+
+    async fn fill_buffer(&mut self) {
+        core::future::pending().await
+    }
 }
 
 #[inline(never)]
@@ -293,6 +305,8 @@ impl<'a, T: usb_device::bus::UsbBus> UsbCommand<'a, T> {
     }
 
     pub async fn read_line(&mut self, buffer: &mut [u8]) -> usize {
+        // TODO: this should return a Stream of some sort;
+
         loop {
             let mut read_buffer = [0; 8];
 
