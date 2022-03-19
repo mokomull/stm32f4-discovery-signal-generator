@@ -2,7 +2,6 @@
 #![no_std]
 
 use core::cell::RefCell;
-use core::cmp::min;
 use core::pin::Pin;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use futures::prelude::*;
@@ -28,13 +27,13 @@ const DAC_VOLTAGE: f32 = 3.0;
 
 // 84MHz, since I suppose the APBx prescaler causes the timer clock to be doubled...
 const TIMER_CLOCK_RATE: usize = 84_000_000;
-const SAMPLE_RATE: usize = 10_500_000;
+const SAMPLE_RATE: usize = 500_000;
 // the timer won't behave correctly if the sample rate is not an exact integer number of ticks
 static_assertions::const_assert_eq!(TIMER_CLOCK_RATE % SAMPLE_RATE, 0);
 // nor if it takes more than 16 bits to represent the delay
 static_assertions::const_assert!(TIMER_CLOCK_RATE / SAMPLE_RATE <= 65536);
 
-static USB_EVENT: Mutex<RefCell<bool>> = Mutex::new(RefCell::new(false));
+static INTERRUPTED: Mutex<RefCell<bool>> = Mutex::new(RefCell::new(false));
 
 #[entry]
 fn main() -> ! {
@@ -85,11 +84,11 @@ fn main() -> ! {
     // underlying object.
     let signal_generator = &mut signal_generator;
 
-    poll_OTG_FS(async move {
+    poll_interrupt(async move {
         loop {
             select_biased! {
+                _ = signal_generator.flip_buffer().fuse() => {}
                 cmd = usb_command.next() => do_line(&(cmd.expect("nothing ends the stream")), signal_generator),
-                _ = signal_generator.fill_buffer().fuse() => {}
             }
         }
     })
@@ -116,14 +115,21 @@ fn do_line(line: &[u8], signal_generator: &mut SignalGenerator) {
 
 #[cortex_m_rt::interrupt]
 fn OTG_FS() {
-    interrupt_free(|cs| USB_EVENT.borrow(cs).replace(true));
+    interrupt_free(|cs| INTERRUPTED.borrow(cs).replace(true));
     // the peripheral will continue asserting the interrupt until it is poll()ed, so mask it here to
     // avoid an infinite loop.  It needs to be unmasked before calling WFI.
     stm32::NVIC::mask(interrupt::OTG_FS);
 }
 
-#[allow(non_snake_case)]
-fn poll_OTG_FS<F>(mut future: F) -> F::Output
+#[cortex_m_rt::interrupt]
+fn DMA1_STREAM5() {
+    interrupt_free(|cs| INTERRUPTED.borrow(cs).replace(true));
+    // the peripheral will continue asserting the interrupt until it is poll()ed, so mask it here to
+    // avoid an infinite loop.  It needs to be unmasked before calling WFI.
+    stm32::NVIC::mask(interrupt::DMA1_STREAM5);
+}
+
+fn poll_interrupt<F>(mut future: F) -> F::Output
 where
     F: core::future::Future,
 {
@@ -143,9 +149,10 @@ where
             // interrupts
             unsafe {
                 stm32::NVIC::unmask(interrupt::OTG_FS);
+                stm32::NVIC::unmask(interrupt::DMA1_STREAM5);
             }
 
-            if USB_EVENT.borrow(cs).replace(false) {
+            if INTERRUPTED.borrow(cs).replace(false) {
                 // TODO: what does the Waker even need to do here; for know I know everything needs
                 // to be polled if and only if the USB interrupt fires
                 // unsafe: I don't even move `future` so this is fine, right?
@@ -163,12 +170,14 @@ where
 }
 
 struct SignalGenerator {
-    samples: [u16; 42000],
+    samples: [[u16; 20000]; 2],
     dac: stm32::DAC,
     dma: stm32::DMA1,
     hz: usize,
     mvpp: usize,
     mvoff: usize,
+    periods: u32,
+    last_buffer_was_zero: bool,
 }
 
 impl SignalGenerator {
@@ -181,12 +190,14 @@ impl SignalGenerator {
         timer.cr1.write(|w| w.cen().set_bit());
 
         let mut me = Self {
-            samples: [0; 42000],
+            samples: [[0; 20000]; 2],
             dac,
             dma,
             hz: 1000,
             mvpp: 2_700,
             mvoff: 1_500,
+            periods: 0,
+            last_buffer_was_zero: true,
         };
         me.update();
         me
@@ -208,6 +219,9 @@ impl SignalGenerator {
     }
 
     fn update(&mut self) {
+        self.periods = 0;
+        self.fill_buffer();
+
         // DAC is stream 5, channel 7
         let stream = &self.dma.st[5];
         // first, disable the stream so the addresses can be updated
@@ -215,19 +229,19 @@ impl SignalGenerator {
         // and wait for anything in progress to finish
         while stream.cr.read().en().bit() {}
 
-        // calculate the new samples to be sent
-        let loop_samples = update_frequency(&mut self.samples, self.hz, self.mvpp, self.mvoff);
-
         // from and to address
         stream
             .par
             .write(|w| unsafe { w.bits(&self.dac.dhr12r1 as *const _ as u32) });
         stream
             .m0ar
-            .write(|w| unsafe { w.bits(&self.samples[0] as *const _ as u32) });
+            .write(|w| unsafe { w.bits(&self.samples[0][0] as *const _ as u32) });
+
         // since we'll have the memory transferred a u16 at a time, the number of samples is the
         // number of memory transactions
-        stream.ndtr.write(|w| w.ndt().bits(loop_samples as u16));
+        stream
+            .ndtr
+            .write(|w| w.ndt().bits(self.samples[0].len() as u16));
         // clear all the stream 5 bits from the status register -- the datasheet says they need to
         // be clear before enabling the stream
         self.dma.hifcr.write(|w| {
@@ -247,9 +261,9 @@ impl SignalGenerator {
             w.psize().bits16();
             w.minc().incremented(); // increment the memory address we're reading from each cycle
             w.pinc().fixed(); // but keep the peripheral register the same
-            w.circ().enabled(); // circular mode means I don't have to keep refilling the buffer
             w.dir().memory_to_peripheral();
             w.pfctrl().dma(); // DMA controller sets the buffer size
+            w.tcie().enabled(); // enable interrupts when the transfer is complete
             w.en().enabled() // enable the DMA stream!
         });
         // and tell the DAC to trigger DMA transfers
@@ -262,28 +276,64 @@ impl SignalGenerator {
         });
     }
 
-    async fn fill_buffer(&mut self) {
-        core::future::pending().await
+    fn fill_buffer(&mut self) {
+        use micromath::F32Ext;
+
+        let samples = match self.last_buffer_was_zero {
+            true => &mut self.samples[0], // we are about to start sending buffer 1, so overwrite buffer 0
+            false => &mut self.samples[1],
+        };
+
+        let vpp = self.mvpp as f32 / 1000.0;
+        let amplitude = 0x1000 /* 12 bits */ as f32 * (vpp / 2.0) / DAC_VOLTAGE;
+        let off = self.mvoff as f32 / 1000.0;
+        let offset = 0x1000 /* 12 bits */ as f32 * off / DAC_VOLTAGE;
+
+        for i in 0..samples.len() {
+            samples[i] = ((amplitude
+                * (2.0
+                    * core::f32::consts::PI
+                    * self.hz as f32
+                    * (i + self.periods as usize * samples.len()) as f32
+                    / SAMPLE_RATE as f32)
+                    .sin())
+                + offset) as u16;
+        }
+
+        self.periods += 1;
     }
-}
 
-#[inline(never)]
-fn update_frequency(samples: &mut [u16], hz: usize, mvpp: usize, mvoff: usize) -> usize {
-    use micromath::F32Ext;
+    async fn flip_buffer(&mut self) {
+        WaitForDMA { dma: &mut self.dma }.await;
 
-    let loop_samples = min(SAMPLE_RATE / hz, samples.len());
-    let vpp = mvpp as f32 / 1000.0;
-    let amplitude = 0x1000 /* 12 bits */ as f32 * (vpp / 2.0) / DAC_VOLTAGE;
-    let off = mvoff as f32 / 1000.0;
-    let offset = 0x1000 /* 12 bits */ as f32 * off / DAC_VOLTAGE;
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..loop_samples {
-        samples[i] = ((amplitude
-            * (2.0 * core::f32::consts::PI * i as f32 / loop_samples as f32).sin())
-            + offset) as u16;
+        let stream = &self.dma.st[5];
+
+        let next_buffer = match self.last_buffer_was_zero {
+            true => &self.samples[1],
+            false => &self.samples[0],
+        };
+
+        stream
+            .m0ar
+            .write(|w| unsafe { w.bits(next_buffer as *const _ as u32) });
+        stream
+            .ndtr
+            .write(|w| w.ndt().bits(next_buffer.len() as u16));
+        stream.cr.modify(|_r, w| w.en().enabled());
+
+        self.fill_buffer();
+
+        let status = self.dma.hisr.read();
+        let dac_status = self.dac.sr.read();
+
+        // if fill_buffer() takes longer than 20,000 samples' worth of time, then the DAC may
+        // *still* underrun its buffer.  Make that loud for now.
+        if status.teif5().bit() || status.dmeif5().bit() || dac_status.dmaudr1().bit() {
+            panic!("dma: {:x?}, dac {:x?}", status.bits(), dac_status.bits());
+        }
+
+        self.last_buffer_was_zero = !self.last_buffer_was_zero;
     }
-
-    loop_samples
 }
 
 struct UsbCommand<'a, T: usb_device::bus::UsbBus> {
@@ -342,6 +392,24 @@ impl<'a, T: usb_device::bus::UsbBus> Stream for UsbCommand<'a, T> {
             return Poll::Ready(Some(
                 self.buffer.drain(..newline + 1).take(newline).collect(),
             ));
+        }
+
+        Poll::Pending
+    }
+}
+
+struct WaitForDMA<'a> {
+    dma: &'a mut stm32::DMA1,
+}
+
+impl<'a> Future for WaitForDMA<'a> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        let sr = self.dma.hisr.read();
+        if sr.tcif5().bit_is_set() {
+            self.dma.hifcr.write(|w| w.ctcif5().set_bit());
+            return Poll::Ready(());
         }
 
         Poll::Pending
